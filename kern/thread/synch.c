@@ -183,26 +183,42 @@ void
 lock_acquire(struct lock *lock)
 {
         // Write this
+	KASSERT(lock != NULL);
+	KASSERT(!lock_do_i_hold(lock))
 
-        (void)lock;  // suppress warning until code gets written
+	spin_acquire(lock->spin);
+	while (lock->held){
+		wchan_lock(lock->wchan);
+		spin_release(lock->spin);
+		wchan_sleep(lock->wchan);
+		spin_acquire(lock->spin);
+	}
+	lock->held = true;
+	lock->owner = curthread;
+	spin_release(lock->spin);
 }
 
 void
 lock_release(struct lock *lock)
 {
         // Write this
-
-        (void)lock;  // suppress warning until code gets written
+	KASSERT(lock != NULL);
+	KASSERT(lock_do_i_hold(lock));
+	spin_acquire(lock->spin);
+	lock->held = false;
+	lock->owner = NULL;
+	wchan_wakeone(lock->wchan);
+	spin_release(lock->spin);
 }
 
 bool
 lock_do_i_hold(struct lock *lock)
 {
         // Write this
-
-        (void)lock;  // suppress warning until code gets written
-
-        return true; // dummy until code gets written
+	if (lock->owner == curthread){
+		return true;
+	}
+	return false;
 }
 
 ////////////////////////////////////////////////////////////
