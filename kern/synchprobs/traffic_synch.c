@@ -34,15 +34,9 @@ static unsigned int vehicleCount = 0; // global vehicle counter which represents
 // grid representing vehicles currently in the intersection
 // grid[d1][d2] is the number of vehicles in the intersection with origin d1 and destination d2
 // allows vehicles with the same origin and destination in the wait queue to be unblocked 
-static int grid[4][4] = 
-{
-  {0,0,0,0},
-  {0,0,0,0},
-  {0,0,0,0},
-  {0,0,0,0}
-};
+static volatile int grid[4][4] = {{0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}}; 
 
-// puts origin, destination pairs into one structure so that they can be more easily managed
+// puts origin/destination pairs into one structure so that they can be more easily managed
 struct directionPair {
   Direction orig;
   Direction dest;
@@ -127,66 +121,61 @@ intersection_before_entry(Direction origin, Direction destination)
   // vehicleIndex is equal to the position of the current vehicle; i.e. vehicleIndex = n-1 means current vehicle is the n-th vehicle 
   unsigned int *vehicleIndex = kmalloc(sizeof(unsigned int));
   *vehicleIndex = vehicleCount;
+
+  // add index of current vehicle to wait queue (i.e. indexQueue)
   array_add(indexQueue, vehicleIndex, NULL);
 
   vehicleCount++;
  
-  // create pair with both origin and destination to add to queue
-  struct directionPair *dpair = kmalloc(sizeof(struct directionPair));
-  dpair->orig = origin;
-  dpair->dest = destination;
-  
-  // loop runs until it is safe for current vehicle to enter the intersection
-  while (true) {
-    // stop/block vehicle (i.e. prevent from entering intersection) until either:
-    //   1. there is another vehicle in the intersection with the same origin and destination
-    //   2. current vehicle is the first in the wait queue 
-    while (grid[origin][destination] == 0 && *(unsigned int *)array_get(indexQueue, 0) != *vehicleIndex) {
-      cv_wait(intersectionCV, intersectionLock);
-    }
+  // stop/block vehicle (i.e. prevent from entering intersection) until either:
+  //   1. there is another vehicle in the intersection with the same origin and destination
+  //   2. current vehicle is the first in the wait queue 
+  while (grid[origin][destination] == 0 && *(unsigned int *)array_get(indexQueue, 0) != *vehicleIndex) {
+    cv_wait(intersectionCV, intersectionLock);
+  }
 
-    // if there is a vehicle in intersection with the same origin and destination, it is safe to enter the intersection  
-    if (grid[origin][destination] != 0) {
-      break;
-    }   
+  bool noCollision = true;
     
-    // otherwise, we check if the vehicle may collide with any vehicle in the intersection 
-    bool valid = true;
-    
-    for (unsigned int i=0; i<array_num(intersectionQueue); i++){
-      struct directionPair *vehiclePair = (struct directionPair*)array_get(intersectionQueue, i);
-      Direction vOrigin = vehiclePair->orig;
-      Direction vDest = vehiclePair->dest;
+  for (unsigned int i=0; i<array_num(intersectionQueue); i++){
+    struct directionPair *vehiclePair = (struct directionPair*)array_get(intersectionQueue, i);
+    Direction vOrigin = vehiclePair->orig;
+    Direction vDest = vehiclePair->dest;
       
-      if (origin == vOrigin) {
-        continue;
-      }
-      else if (origin == vDest && destination == vOrigin) { 
-        continue;
-      }
-      else if (destination != vDest && (right_turn(vOrigin, vDest) || right_turn(origin, destination))) {
-        continue;
-      }
-      else {
-        valid = false;
-        break;
-      }
+    if (origin == vOrigin) {
+      continue;
     }
-   
-    if (valid) {
-      break;
+    else if (origin == vDest && destination == vOrigin) { 
+      continue;
+    }
+    else if (destination != vDest && (right_turn(vOrigin, vDest) || right_turn(origin, destination))) {
+      continue;
+    }
+    else {
+      noCollision = false;
     }
   }
   
+
+  // if the first vehicle in queue cannot enter intersection, we wait until it is empty
+  if (noCollision == false) {
+    while (array_num(intersectionQueue) != 0) {
+      cv_wait(intersectionCV, intersectionLock);
+    }
+  }
+ 
   // remove current vehicle from wait queue
   for (unsigned int i=0; i<array_num(indexQueue); i++){
-    if (vehicleIndex == (unsigned int *)array_get(indexQueue, i)) {
+    if (vehicleIndex == array_get(indexQueue, i)) {
+      kfree(array_get(indexQueue, i));
       array_remove(indexQueue, i);
       break;
     }
   }
   
-  // add current vehicle to intersection queue, and change grid accordingly
+  // add current vehicle to intersection queue as an origin/destination pair, and change grid accordingly
+  struct directionPair *dpair = kmalloc(sizeof(struct directionPair));
+  dpair->orig = origin;
+  dpair->dest = destination;
   array_add(intersectionQueue, dpair, NULL);
   grid[origin][destination]++;
 
@@ -213,9 +202,10 @@ intersection_after_exit(Direction origin, Direction destination)
   lock_acquire(intersectionLock);
 
   // vehicles enter and leave in the same order, so we pop off the first vehicle in intersection queue
+  kfree(array_get(intersectionQueue, 0));
   array_remove(intersectionQueue, 0);
   grid[origin][destination]--;
-
+  
   // broadcast to all waiting vehicles if intersection is empty
   if (array_num(intersectionQueue) == 0){
     cv_broadcast(intersectionCV, intersectionLock);

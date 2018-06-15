@@ -10,6 +10,30 @@
 #include <addrspace.h>
 #include <copyinout.h>
 
+static 
+
+int sys_fork(struct trapframe *trap) {
+
+  // create child process
+  proc *childproc = proc_create_runprogram(curproc->p_name);
+  
+  // if proc_create_program is NULL, then return non-zero exit code
+  if (childproc == NULL) {
+    return 1;  
+  }
+  
+  int err = as_copy(curproc_getas(), &childproc->p_addrspace);
+  
+  // if as_copy returns a non zero error code, return the error code 
+  if (err != 0) {
+    return err;
+  }
+
+  
+
+}
+
+
   /* this implementation of sys__exit does not do anything with the exit code */
   /* this needs to be fixed to get exit() and waitpid() working properly */
 
