@@ -49,7 +49,11 @@
 #include <vnode.h>
 #include <vfs.h>
 #include <synch.h>
-#include <kern/fcntl.h>  
+#include <kern/fcntl.h> 
+#include <kern/limits.h>
+#include <kern/wait.h>
+
+#include "opt-A2.h"
 
 /*
  * The process for the kernel; this holds all the kernel-only threads.
@@ -69,7 +73,82 @@ static struct semaphore *proc_count_mutex;
 struct semaphore *no_proc_sem;   
 #endif  // UW
 
+#if OPT_A2
+// Added section for A2
 
+// lock to enforce mutual exclusion of PID assignment
+
+static struct lock *pidLock;
+static int pidCount = __PID_MIN - 1;
+
+// create array to keep track of taken PIDs. Note that we can have at most PID_MAX - PID_MIN + 1 PIDs at a time
+// pidArray[PID] = 0 if PID is available
+// pidArray[PID] = 1 if PID is taken and is an active process
+// pidArray[PID[ = -1 if PID is taken and is a zombie process
+static int pidArray[__PID_MAX + 1];
+
+static int exitcodeArray[__PID_MAX + 1];
+
+int proc_getnewpid(void) {
+  lock_acquire(pidLock);
+  
+  pidCount += 1;
+  pidArray[pidCount] = 1;
+
+  lock_release(pidLock);
+  return pidCount;
+}
+
+// wait for child pid to exit if it is active, otherwise return with the codes
+int proc_waitforchild(struct proc *childproc) {
+  lock_acquire(pidLock);
+  
+  // this should never fail based on the implementation
+  KASSERT(pidArray[childproc->pid] != 0);
+ 
+  if (pidArray[childproc->pid] == 1) {
+    cv_wait(childproc->p_cv, pidLock);
+  }
+  
+  int exitstatus = _MKWAIT_EXIT(exitcodeArray[childproc->pid]);
+ 
+  lock_release(pidLock);  
+  
+  return exitstatus;
+}
+
+// update exitcode in array, and wake parent
+void proc_exitcode(struct proc *p, int exitcode) {
+  lock_acquire(pidLock);
+
+  exitcodeArray[p->pid] = exitcode;
+  
+  //become zombie
+  pidArray[p->pid] = -1;
+  
+  // wake up parent, which is currently sleeping on child CV
+  cv_broadcast(p->p_cv, pidLock);
+
+  lock_release(pidLock);
+}
+
+bool proc_hasparent(struct proc *p) {
+  // if process has a zombie parent, then it is either the root process (i.e. ppid < 0) or the parent process is inactive
+  if (p->ppid < 0 || pidArray[p->ppid] != 1) {
+    return false;
+  }
+  return true;
+}
+
+void proc_destroyzombiechildren(struct proc *p) {
+  for (unsigned int i = 0; i<array_num(p->children); i++) {
+    struct proc *childproc = (struct proc*)array_get(p->children, i);
+    if (pidArray[childproc->pid] == -1) {
+      proc_destroy(childproc);
+    }  
+  }
+}
+#endif /* OPT_A2 */
 
 /*
  * Create a proc structure.
@@ -102,6 +181,11 @@ proc_create(const char *name)
 #ifdef UW
 	proc->console = NULL;
 #endif // UW
+
+#if OPT_A2 
+        proc->p_cv = cv_create(proc->p_name);      
+	proc->children = array_create();
+#endif /* OPT_A2 */  
 
 	return proc;
 }
@@ -167,6 +251,10 @@ proc_destroy(struct proc *proc)
 	spinlock_cleanup(&proc->p_lock);
 
 	kfree(proc->p_name);
+#if OPT_A2      
+        cv_destroy(proc->p_cv);
+#endif /* OPT_A2 */
+
 	kfree(proc);
 
 #ifdef UW
@@ -183,7 +271,6 @@ proc_destroy(struct proc *proc)
 	}
 	V(proc_count_mutex);
 #endif // UW
-	
 
 }
 
@@ -208,6 +295,13 @@ proc_bootstrap(void)
     panic("could not create no_proc_sem semaphore\n");
   }
 #endif // UW 
+
+#if OPT_A2
+  pidLock = lock_create("pidLock");
+  if (pidLock == NULL) {
+    panic("could not create pid lock");
+  }
+#endif /* OPT_A2 */
 }
 
 /*
@@ -270,7 +364,9 @@ proc_create_runprogram(const char *name)
 	proc_count++;
 	V(proc_count_mutex);
 #endif // UW
-
+#if OPT_A2	
+	proc->pid = proc_getnewpid();
+#endif /* OPT_A2 */
 	return proc;
 }
 
