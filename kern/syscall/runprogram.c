@@ -44,6 +44,9 @@
 #include <vfs.h>
 #include <syscall.h>
 #include <test.h>
+#include <copyinout.h>
+
+#include "opt-A2.h"
 
 /*
  * Load program "progname" and start running it in usermode.
@@ -52,7 +55,7 @@
  * Calls vfs_open on progname and thus may destroy it.
  */
 int
-runprogram(char *progname)
+runprogram(char *progname, int argc, char **argv)
 {
 	struct addrspace *as;
 	struct vnode *v;
@@ -97,12 +100,48 @@ runprogram(char *progname)
 		return result;
 	}
 
-	/* Warp to user mode. */
-	enter_new_process(0 /*argc*/, NULL /*userspace addr of argv*/,
-			  stackptr, entrypoint);
-	
-	/* enter_new_process does not return. */
-	panic("enter_new_process returned\n");
+#if OPT_A2 
+
+	// pointers to each arg, used so we can store array
+ 	vaddr_t *argptrs = (vaddr_t *)kmalloc((argc + 1) * sizeof(vaddr_t));
+  	if (argptrs == NULL) {
+    		return ENOMEM;
+  	}
+ 	argptrs[argc] = (vaddr_t)NULL;
+
+  	// copy arguments onto userstack
+  	// since arguments are pushed onto stack from right to left, we start at argc - 1
+  	for (int i = argc - 1; i >= 0; i--) {
+    		size_t argsize = strlen(argv[i]) + 1 * sizeof(char);
+    		argsize = ROUNDUP(argsize, 8);
+
+    		// allocate room for arg
+    		stackptr -= argsize;
+
+    		result = copyoutstr((const char *)argv[i], (userptr_t)stackptr, argsize , NULL);
+
+    		if (result) {
+     			 return result;
+    		}
+
+   	 	argptrs[i] = stackptr;
+  	}	
+
+  	// copy array onto userstack
+  	for (int i = argc; i >= 0; i--) {
+    		size_t ptrsize = ROUNDUP(sizeof(vaddr_t), 4);
+    		stackptr -= ptrsize;
+
+    		result = copyout((const void *)&argptrs[i], (userptr_t)stackptr, ptrsize);
+
+    		if (result) {
+      			return result;
+		}
+	}
+
+	enter_new_process(argc, (userptr_t)stackptr, stackptr, entrypoint);
+
+	panic("return from enter_new_process in sys_execv");
 	return EINVAL;
 }
-
+#endif /*OPT_A2*/

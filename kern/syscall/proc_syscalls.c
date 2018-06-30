@@ -12,13 +12,14 @@
 #include <syscall.h>
 #include <mips/trapframe.h>
 #include <array.h>
+#include <vfs.h>
+#include <kern/fcntl.h>
 
 #include "opt-A2.h"
 
 #if OPT_A2
 // fork implementation 
 int sys_fork(struct trapframe *tf, pid_t *retval) {
-
   // create child process
   struct proc *childproc = proc_create_runprogram(curproc->p_name);
   
@@ -170,30 +171,64 @@ sys_waitpid(pid_t pid,
 }
 
 int
-sys_execv(const char *program_path) {  
+sys_execv(const char *program, char **args) {  
   struct addrspace *as;
   struct vnode *v;
   vaddr_t entrypoint, stackptr;
   int result;
 
 
-  // count number of args and copy into the kernel
+  // count number of arguments
+  int argc = 0;
+  while (args[argc] != NULL) {
+    argc += 1;
+  } 
+ 
+  // Note that since argv is terminated by NULL, we use argc + 1 here
+  char **progargs = (char **)kmalloc((argc + 1) * sizeof(char *));
+  progargs[argc] = NULL;
   
+  if (progargs == NULL) {
+    return ENOMEM;
+  }
+
+  // copy arguments to kernel in variable progargs
+  for (int i = 0; i < argc; i++){
+    size_t argsize = (strlen(args[i]) + 1) * sizeof(char);
+    progargs[i] = (char *)kmalloc(argsize);
+    
+    if (progargs[i] == NULL) {
+      return ENOMEM;
+    }
+    
+    result = copyinstr((const_userptr_t)args[i], progargs[i], argsize, NULL);
+
+    if (result) {
+      return result;
+    }
+  }
+  
+  // kprintf(progargs[0]);
 
   // copy program path into kernel
-  char *
+  size_t prognamesize = (strlen(program) + 1) * sizeof(char);
+  char *progname = (char *)kmalloc(prognamesize);
 
+  if (progname == NULL) {
+    return ENOMEM;
+  }
   
-  // code from runprogram
+  result = copyinstr((const_userptr_t)program, progname, prognamesize, NULL);
 
+  if (result) {
+    return result;
+  }
+  // code from runprogram
   /* Open the file. */
   result = vfs_open(progname, O_RDONLY, 0, &v);
   if (result) {
      return result;
   }
-
-  /* We should be a new process. */
-  KASSERT(curproc_getas() == NULL);
 
   /* Create a new address space. */
   as = as_create();
@@ -215,7 +250,56 @@ sys_execv(const char *program_path) {
   }
 
   /* Done with the file now. */
-  vfs_close(v);
+  vfs_close(v); 
+  
+  result = as_define_stack(as, &stackptr);
+  if (result) {
+    return result;
+  }
+  // end code from runprogram
+
+  
+  // pointers to each arg, used so we can store array
+  vaddr_t *argptrs = (vaddr_t *)kmalloc((argc + 1) * sizeof(vaddr_t));
+  if (argptrs == NULL) {
+    return ENOMEM;
+  }
+  argptrs[argc] = (vaddr_t)NULL;
+  
+  // copy arguments onto userstack
+  // since arguments are pushed onto stack from right to left, we start at argc - 1
+  for (int i = argc - 1; i >= 0; i--) {
+    size_t argsize = strlen(progargs[i]) + 1 * sizeof(char);
+    argsize = ROUNDUP(argsize, 8);
+    
+    // allocate room for arg
+    stackptr -= argsize;
+
+    result = copyoutstr((const char *)progargs[i], (userptr_t)stackptr, argsize , NULL);
+    
+    if (result) {
+      return result;
+    }
+
+    argptrs[i] = stackptr;
+  }
+  
+  // copy array onto userstack
+  for (int i = argc; i >= 0; i--) {
+    size_t ptrsize = ROUNDUP(sizeof(vaddr_t), 4);
+    stackptr -= ptrsize;
+    
+    result = copyout((const void *)&argptrs[i], (userptr_t)stackptr, ptrsize);
+    
+    if (result) {
+      return result;
+    }  
+  }
+  
+  enter_new_process(argc, (userptr_t)stackptr, stackptr, entrypoint);
+
+  panic("return from enter_new_process in sys_execv");
+  return EINVAL;
 
 }
 
